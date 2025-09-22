@@ -1,2 +1,18 @@
-venv
-dev
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs and local artifacts
+*.log
+output/
+*.csv
+*.xlsx
+
+# OS junk
+.DS_Store
