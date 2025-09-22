@@ -8,11 +8,7 @@ and postal codes.
 The script can be invoked from the command line::
 
     python sitemap_scraper.py --keyword plombier --input input.txt \
- codex/add-scraper-for-local.ch-using-sitemaps-by4frz
         --output output/plombiers_geneve.csv
-
-        --output plombiers_geneve.csv
-main
 
 The input file must contain one postal code per line. The keyword is
 matched against the textual content of the business detail page. The
@@ -29,22 +25,62 @@ import json
 import logging
 import re
 import time
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Iterable, Iterator, List, Optional, Protocol, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
 
-import requests
-from bs4 import BeautifulSoup
 
 
 SITEMAP_INDEX_URL = "https://www.local.ch/sitemaps/sitemap_index.xml"
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
 DEFAULT_OUTPUT_DIR = Path("output")
 DEFAULT_OUTPUT_FILE = DEFAULT_OUTPUT_DIR / "local_ch_results.csv"
 
-main
+
+
+@dataclass
+class SimpleHttpResponse:
+    status_code: int
+    content: bytes
+
+
+class HttpClient(Protocol):
+    def get(self, url: str, timeout: float = 30) -> SimpleHttpResponse:
+        ...
+
+
+class HttpClientError(RuntimeError):
+    pass
+
+
+class UrlLibHttpClient:
+    """Minimal HTTP client based on urllib to avoid external dependencies."""
+
+    def __init__(self, headers: Optional[dict[str, str]] = None) -> None:
+        self.headers: dict[str, str] = headers or {}
+
+    def get(self, url: str, timeout: float = 30) -> SimpleHttpResponse:
+        request = urllib.request.Request(url, headers=self.headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return SimpleHttpResponse(
+                    status_code=response.getcode() or 200,
+                    content=response.read(),
+                )
+        except urllib.error.HTTPError as exc:
+            return SimpleHttpResponse(status_code=exc.code, content=exc.read())
+        except urllib.error.URLError as exc:
+            raise HttpClientError(str(exc)) from exc
+
+
+
+def _create_soup(html: str):
+    from bs4 import BeautifulSoup
+
+    return BeautifulSoup(html, "html.parser")
 
 
 def _strip_namespace(tag: str) -> str:
@@ -113,15 +149,13 @@ class LocalChSitemapScraper:
         keyword: str,
         postal_codes: Sequence[str],
         language: str = "fr",
-        session: Optional[requests.Session] = None,
+        session: Optional[HttpClient] = None,
         logger: Optional[logging.Logger] = None,
         max_retries: int = 3,
         retry_delay: float = 1.5,
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
         max_search_pages: int = 200,
         max_detail_pages: int = 2000,
 
-main
     ) -> None:
         self.keyword = keyword.lower()
         self.postal_codes: Set[str] = {
@@ -131,24 +165,26 @@ main
         self.base_url = "https://www.local.ch"
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
         self.max_search_pages = max_search_pages
         self.max_detail_pages = max_detail_pages
 
-main
+        default_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/116.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+        }
 
-        self.session = session or requests.Session()
-        self.session.headers.update(
-            {
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/116.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-            }
-        )
+        if session is None:
+            self.session: HttpClient = UrlLibHttpClient(default_headers)
+        else:
+            self.session = session
+            headers = getattr(self.session, "headers", None)
+            if isinstance(headers, dict):
+                headers.update(default_headers)
 
         self.logger = logger or logging.getLogger(self.__class__.__name__)
 
@@ -161,16 +197,24 @@ main
         for attempt in range(1, self.max_retries + 1):
             try:
                 response = self.session.get(url, timeout=30)
-                if response.status_code == 200:
-                    return response.content
-                if response.status_code == 404:
+            except HttpClientError as exc:
+                self.logger.warning("Request error for %s: %s", url, exc)
+                response = None
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                self.logger.warning("Unexpected error for %s: %s", url, exc)
+                response = None
+
+            if response is not None:
+                status_code = getattr(response, "status_code", None)
+                content = getattr(response, "content", b"")
+                if status_code == 200:
+                    return content
+                if status_code == 404:
                     self.logger.debug("URL not found: %s", url)
                     return None
                 self.logger.warning(
-                    "Unexpected status %s while fetching %s", response.status_code, url
+                    "Unexpected status %s while fetching %s", status_code, url
                 )
-            except requests.RequestException as exc:
-                self.logger.warning("Request error for %s: %s", url, exc)
 
             if attempt < self.max_retries:
                 time.sleep(self.retry_delay * attempt)
@@ -204,7 +248,6 @@ main
             if not _is_local_domain(sitemap_url):
                 continue
 
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
             lowered_sitemap_url = sitemap_url.lower()
             if "/search" in lowered_sitemap_url and len(search_pages) >= self.max_search_pages:
                 self.logger.debug(
@@ -219,7 +262,6 @@ codex/add-scraper-for-local.ch-using-sitemaps-by4frz
                 )
                 continue
 
-main
             self.logger.debug("Fetching sitemap: %s", sitemap_url)
             content = self.fetch_bytes(sitemap_url)
             if content is None:
@@ -244,7 +286,6 @@ main
             if tag == "sitemapindex":
                 for loc_node in root.findall("sm:sitemap/sm:loc", ns):
                     loc_text = (loc_node.text or "").strip()
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
                     if not loc_text:
                         continue
 
@@ -252,21 +293,15 @@ codex/add-scraper-for-local.ch-using-sitemaps-by4frz
                         continue
 
                     queue.append(loc_text)
-
-                    if loc_text:
-                        queue.append(loc_text)
-main
                 continue
 
             if tag != "urlset":
                 continue
 
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
             is_search_sitemap = "/search" in lowered_sitemap_url
             is_detail_sitemap = "/detail" in lowered_sitemap_url
 
 
-main
             for loc_node in root.findall("sm:url/sm:loc", ns):
                 loc_text = (loc_node.text or "").strip()
                 if not loc_text:
@@ -276,7 +311,6 @@ main
                 if not _is_local_domain(loc_text):
                     continue
 
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
                 if is_search_sitemap:
                     if self._is_search_page(loc_text, lowered):
                         search_pages.add(loc_text)
@@ -296,15 +330,14 @@ codex/add-scraper-for-local.ch-using-sitemaps-by4frz
                             )
                             break
 
-            if len(search_pages) >= self.max_search_pages and len(detail_pages) >= self.max_detail_pages:
-                self.logger.debug("Both search and detail page limits reached; stopping sitemap crawl")
+            if (
+                len(search_pages) >= self.max_search_pages
+                and len(detail_pages) >= self.max_detail_pages
+            ):
+                self.logger.debug(
+                    "Both search and detail page limits reached; stopping sitemap crawl"
+                )
                 break
-
-                if self._is_search_page(loc_text, lowered):
-                    search_pages.add(loc_text)
-                elif self._is_detail_page(loc_text, lowered):
-                    detail_pages.add(loc_text)
-main
 
         if not search_pages:
             self.logger.warning(
@@ -312,7 +345,6 @@ main
             )
         return search_pages, detail_pages
 
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
     def _should_follow_sitemap(self, url: str) -> bool:
         lowered = url.lower()
         if url == SITEMAP_INDEX_URL:
@@ -322,30 +354,48 @@ codex/add-scraper-for-local.ch-using-sitemaps-by4frz
         return False
 
 
-main
     def _is_search_page(self, url: str, lowered: str) -> bool:
         parsed = urlparse(url)
-        if "/q" not in parsed.path and "search" not in parsed.path:
+        path_lower = parsed.path.lower()
+        if "search" not in path_lower:
+            return False
+
+        # local.ch structures search sitemaps as /sitemaps/<lang>/search/...
+        path_parts = [part for part in parsed.path.split("/") if part]
+        language_code: Optional[str] = None
+        if path_parts:
+            if path_parts[0] == "sitemaps" and len(path_parts) >= 2:
+                language_code = path_parts[1].lower()
+            else:
+                language_code = path_parts[0].lower()
+
+        if self.language and language_code and language_code != self.language.lower():
             return False
 
         query = parse_qs(parsed.query)
-        if query:
-            if self.keyword and all(self.keyword not in value.lower() for value in query.get("what", [])):
+        if self.keyword:
+            keyword_present = self.keyword in lowered
+            if not keyword_present:
                 keyword_present = any(
                     self.keyword in value.lower() for value in query.get("what", [])
                 )
-                if not keyword_present:
-                    return False
+            if not keyword_present:
+                return False
 
-            if self.postal_codes:
-                for code in self.postal_codes:
-                    if any(code in value for value in query.get("where", [])):
-                        return True
-                return any(code in lowered for code in self.postal_codes)
+        if not self.postal_codes:
+            return True
 
-        return self.keyword in lowered and (
-            not self.postal_codes or any(code in lowered for code in self.postal_codes)
-        )
+        where_values = [value.lower() for value in query.get("where", [])]
+        for code in self.postal_codes:
+            if code in lowered:
+                return True
+            if any(code in value for value in where_values):
+                return True
+
+        # Many sitemap entries describe the location using a city name rather than the
+        # numeric postal code. In that case we still want to visit the search page so
+        # that detail pages can be filtered later on based on their actual postcode.
+        return True
 
     def _is_detail_page(self, url: str, lowered: str) -> bool:
         parsed = urlparse(url)
@@ -379,7 +429,7 @@ main
                 break
             yield next_url, html
 
-            soup = BeautifulSoup(html, "html.parser")
+            soup = _create_soup(html)
             link_tag = soup.find("link", attrs={"rel": "next"})
             if link_tag and link_tag.get("href"):
                 next_href = link_tag["href"]
@@ -596,7 +646,6 @@ def read_postal_codes(path: Path) -> List[str]:
 
 
 def write_csv(path: Path, records: Iterable[BusinessRecord]) -> None:
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
     path = Path(path)
     if not path.suffix:
         # Allow passing a directory path. In that case, drop the default
@@ -607,7 +656,6 @@ codex/add-scraper-for-local.ch-using-sitemaps-by4frz
     target_dir.mkdir(parents=True, exist_ok=True)
 
 
-main
     fieldnames = [
         "source_url",
         "name",
@@ -645,16 +693,11 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--output",
         "-o",
         type=Path,
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
         default=DEFAULT_OUTPUT_FILE,
         help=(
             "Destination CSV file. When a directory is provided, the default "
             f"filename '{DEFAULT_OUTPUT_FILE.name}' will be used."
         ),
-
-        default=Path("local_ch_results.csv"),
-        help="Destination CSV file.",
-main
     )
     parser.add_argument(
         "--language",
@@ -667,7 +710,6 @@ main
         action="store_true",
         help="Enable verbose logging for debugging purposes.",
     )
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
     parser.add_argument(
         "--max-search-pages",
         type=int,
@@ -681,7 +723,6 @@ codex/add-scraper-for-local.ch-using-sitemaps-by4frz
         help="Maximum number of detail pages to keep from sitemap discovery.",
     )
 
-main
 
     return parser.parse_args(argv)
 
@@ -701,7 +742,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logging.error("%s", exc)
         return 1
 
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
     if not postal_codes:
         logging.error("Input file %s does not contain any postal code.", args.input)
         return 1
@@ -709,17 +749,14 @@ codex/add-scraper-for-local.ch-using-sitemaps-by4frz
     logging.info("Loaded %s postal codes from %s", len(postal_codes), args.input)
 
 
-main
     scraper = LocalChSitemapScraper(
         keyword=args.keyword,
         postal_codes=postal_codes,
         language=args.language,
         logger=logging.getLogger("localch"),
-codex/add-scraper-for-local.ch-using-sitemaps-by4frz
         max_search_pages=args.max_search_pages,
         max_detail_pages=args.max_detail_pages,
 
-main
     )
 
     records = scraper.run()

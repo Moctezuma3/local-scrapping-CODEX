@@ -23,7 +23,7 @@ simulate browser activity or require Playwright.
 ## Requirements
 
 - Python 3.10 or newer (tested on Python 3.12)
-- System packages required by `requests` (OpenSSL) and `beautifulsoup4`
+- System packages required by `beautifulsoup4`
 
 Install the Python dependencies with:
 
@@ -96,7 +96,7 @@ usage: sitemap_scraper.py [-h] --keyword KEYWORD [--input INPUT]
 ```
 .
 ├── input.txt             # Example postal codes for Geneva (1201, 1202)
-├── requirements.txt      # Minimal dependency list: requests + BeautifulSoup
+├── requirements.txt      # Minimal dependency list: BeautifulSoup
 ├── sitemap_scraper.py    # Main CLI entry point
 └── README.md             # This documentation
 ```
